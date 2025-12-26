@@ -15,6 +15,8 @@ from tqdm import tqdm
 import math
 import matplotlib.pyplot as plt
 import os
+import cv2
+from torch.nn import functional as F
 from sklearn.utils.class_weight import compute_class_weight
 # from get_cls_map import get_cls_map, classification_map, list_to_colormap, get_classification_map
 import wandb
@@ -57,12 +59,13 @@ def loadData(dataset_name="LongKou"):
         tuple: (data, labels, dataset_info)
     """
 
-    # 使用自定义数据集先在这注册。重点关注前四个键：
-    # 2个路径 ([path])；两个键值([key])，其值需要从原光谱头文件.hdr获取。
+    # Register first if using custom dataset. Pay attention to:
+    # 'dataset_path','label_path','data_key','label_key'.
+    # 2 paths and 2 keys whose values are from .hdr.
     dataset_configs = {
         "LongKou": {
-            "data_path": "data/WHU-Hi-LongKou.mat",
-            "label_path": "data/WHU-Hi-LongKou_gt.mat",
+            "data_path": "/data/chenhaoran/WHUhypspec/data/WHU-Hi-LongKou.mat",
+            "label_path": "/data/chenhaoran/WHUhypspec/data/WHU-Hi-LongKou_gt.mat",
             "data_key": "hyperspectral_data",
             "label_key": "hyperspectral_data",
             "num_classes": 9,
@@ -118,8 +121,8 @@ def loadData(dataset_name="LongKou"):
             "description": "Salinas dataset with 16 agricultural classes"
         },
         "HongHu": {
-            "data_path": "data/WHU-Hi-HongHu.mat",
-            "label_path": "data/WHU-Hi-HongHu_gt.mat",
+            "data_path": "/data/chenhaoran/WHUhypspec/data/WHU-Hi-HongHu.mat",
+            "label_path": "/data/chenhaoran/WHUhypspec/data/WHU-Hi-HongHu_gt.mat",
             "data_key": "WHU_Hi_HongHu",
             "label_key": "WHU_Hi_HongHu_gt",
             "num_classes": 22,
@@ -317,8 +320,7 @@ class EnhancedHyperspectralDataset:
         
         return torch.FloatTensor(hyperspectral), pretrained_input, torch.LongTensor([label]).squeeze()
     
-
-
+    
 def applyPCA(X, numComponents=15):
     """
     Apply PCA to reduce dimensionality to exactly 15 components for hyperspectral data
@@ -624,6 +626,53 @@ def save_enhanced_model(model, config, best_acc, kappa, training_time, test_time
     
     print(f"Enhanced model saved with comprehensive metadata")
 
+def generate_cam_plot(model, input_tensor, target_class=None, device='cuda'):
+    """
+    Generate Class Activation Map (CAM) using the model's built-in generate_cam method.
+    This works with EnhancedPEFTHyperspectralGCViT model's existing CAM implementation.
+    
+    Args:
+        model: model with ``generate_cam()`` method.
+        input_tensor: Input tensor ``[B, C, H, W]``.
+        target_class: Specific class index to visualize (``None`` for all class).
+        device: Device to run on (``cuda`` / ``cpu``).
+    
+    Returns:
+        cam_image: CAM visualization array normalized to ``[0, 255]``.
+        pred_class: Predicted class index.
+        true_cam: Raw CAM tensor from model.
+    """
+
+    model.eval()
+    input_tensor = input_tensor.to(device)
+    
+    with torch.no_grad():
+        # Get model predictions AND CAM (using your model's built-in method)
+        outputs, cams = model(input_tensor, return_cam=True)  # FIXED: Use your model's forward method with return_cam
+        pred_class = torch.argmax(outputs, dim=1).item()
+        
+        if len(cams.shape) != 4:
+            raise ValueError(f"CAM has invalid shape {cams.shape}, expected [B, num_classes, H, W].")
+
+        # Select target class for CAM (use predicted if not specified)
+        cam_class = target_class if target_class is not None else pred_class
+
+        num_classes = cams.shape[1]
+        if cam_class >= num_classes:
+            cam_class = 0    # fallback to 1st class if invalid.
+
+        true_cam = cams[0, cam_class, :, :].cpu().numpy()  # Take first batch item, target class
+        
+        # Normalize CAM to [0, 255] for visualization
+        cam_image = (true_cam - true_cam.min()) / (true_cam.max() - true_cam.min() + 1e-8)
+        cam_image = (cam_image * 255).astype(np.uint8)
+        
+        # Resize to match input spatial dimensions (keep aspect ratio)
+        h, w = input_tensor.shape[2], input_tensor.shape[3]
+        cam_image = cv2.resize(cam_image, (w, h), interpolation=cv2.INTER_LINEAR)
+    
+    return cam_image, pred_class, true_cam
+
 class EnhancedTrainer:
     def __init__(self, config):
         self.config = config
@@ -786,6 +835,88 @@ class EnhancedTrainer:
         self.best_epoch = 0
         self.best_model_state = None  # Track best model state for restoration
 
+    def visualize_cam(self, epoch, save_path=f'./outputs/CAM'):
+        """
+        Generate and save CAM visualizations for sample test images.
+        """
+
+        os.makedirs(save_path, exist_ok=True)
+        self.model.eval()
+    
+        try:
+            # Get first batch from test_loader.
+            test_iter = iter(self.test_loader)
+            batch = next(test_iter)
+
+            if len(batch) == 3:
+                hyperspectral, pretrained_input, labels = batch
+            elif len(batch) == 2:
+                hyperspectral, labels = batch
+                pretrained_input = None
+            else:
+                raise ValueError(f"Unexpected batch format: {len(batch)} elements")
+        
+            # Move to device and ensure correct tensor shape [B, C, H, W]
+            hyperspectral = hyperspectral.to(self.device)
+            if hyperspectral.dim() == 4 and hyperspectral.shape[1] != self.config.get('in_channels', 15):
+                # Fix channel dimension if needed (common hyperspectral data format issue)
+                hyperspectral = hyperspectral.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
+        
+            # Generate CAM for first 5 samples (or fewer if batch is smaller)
+            num_samples = min(5, hyperspectral.shape[0])
+            for sample_idx in range(num_samples):
+                # Get single sample (keep batch dimension for model input)
+                sample = hyperspectral[sample_idx:sample_idx+1]
+                true_label = labels[sample_idx].item()
+            
+                # CAM generation.
+                cam_image, pred_label, raw_cam = generate_cam_plot(
+                    model=self.model,
+                    input_tensor=sample,
+                    target_class=None,  # Use predicted class
+                    device=self.device
+                   )
+            
+                # Create visualization plot
+                plt.figure(figsize=(10, 4))
+            
+                # Plot 1: Original hyperspectral data (use first 3 bands as RGB for visualization)
+                plt.subplot(1, 2, 1)
+                # Normalize sample for display
+                vis_sample = sample[0].cpu().numpy()
+                vis_sample = (vis_sample - vis_sample.min()) / (vis_sample.max() - vis_sample.min() + 1e-8)
+                # Use first 3 bands for simulating RGB.
+                if vis_sample.shape[0] >= 3:
+                    rgb_sample = vis_sample[:3].transpose(1, 2, 0)
+                else:
+                    # If fewer than 3 bands, repeat single band for RGB
+                    rgb_sample = np.repeat(vis_sample[0:1].transpose(1, 2, 0), 3, axis=2)
+                plt.imshow(rgb_sample)
+                plt.title(f'ComposedRGB (Label: {true_label})')
+                plt.axis('off')
+                
+                # Plot 2: CAM visualization
+                plt.subplot(1, 2, 2)
+                plt.imshow(cam_image, cmap='jet')
+                plt.title(f'CAM (Pred: {pred_label})')
+                plt.axis('off')
+                
+                # Add color bar for CAM intensity
+                plt.colorbar(fraction=0.046, pad=0.04)
+                
+                # Save the plot.
+                save_filename = f'cam_epoch_{epoch}_sample_{sample_idx}.png'
+                full_save_path = os.path.join(save_path, save_filename)
+                plt.tight_layout()
+                plt.savefig(full_save_path, dpi=150, bbox_inches='tight')
+                plt.close()
+        
+            # Handle exception to avoid training break.
+        except Exception as e:
+            print(f'Failed to generate CAM for epoch{epoch} to: {save_path}.')
+
+            import traceback
+            traceback.print_exc()
     
     def train_epoch(self, epoch):
         """Train for one epoch"""
@@ -995,6 +1126,10 @@ class EnhancedTrainer:
             else:
                 test_loss, test_acc, kappa = None, None, None
             
+            # Save CAM every 10 epochs
+            if (epoch + 1) % 1 == 0:  # +1 because epochs are 0-indexed
+                self.visualize_cam(epoch=epoch+1, save_path=f'./outputs/CAM')  # Use 1-indexed for display
+            
             print(f'Epoch {epoch+1}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%')
             if should_eval:
                 print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.2f}%, Kappa: {kappa:.4f}')
@@ -1146,6 +1281,8 @@ def main():
     parser.add_argument('--dataset', type=str, default='LongKou', 
                        choices=['LongKou', 'IndianPines', 'PaviaU', 'PaviaC', 'Salinas', 'HongHu', 'Qingyun'],
                        help='Dataset to use for training/evaluation')
+    parser.add_argument('--epoch', type=int, default=10,
+                       help='Total epoch for training.')
     parser.add_argument('--model', type=str, default=None,
                        help='Backbone Hugging Face model to use (e.g., nvidia/GCViT, nvidia/GCViT-Tiny)')
     parser.add_argument('--skip-pretrained', action='store_true', default=False,
@@ -1159,7 +1296,7 @@ def main():
     
     # Configuration with dataset selection - OPTIMIZED for CPU/GPU compatibility
     config = {
-        'num_epochs': 100,                  # Reduced for faster training
+        'num_epochs': args.epoch,          # Reduced for faster training
         'batch_size': 32,                  # Smaller batch size for stability
         'learning_rate': 2e-5,
         'weight_decay': 0.01,
@@ -1278,7 +1415,7 @@ def dt():
         'warmup_epochs': 5,                # Reduced warmup
         'grad_clip': 0.5,
         'lora_dropout': 0.2,
-        'fast_eval': False,                # Evaluate on full test set during training
+        'fast_eval': True,                # Evaluate on full test set during training
         'eval_batch_size': 32,             # Smaller eval batch size
         'gradient_accumulation_steps': 2,   # Reduced for CPU training
         'test_ratio': 0.2,                  # 20% for test dataset
@@ -1287,8 +1424,9 @@ def dt():
     
     # Create trainer
     trainer = EnhancedTrainer(config)
+    trainer.train()
     return trainer
 
 if __name__ == "__main__":
-    main()
+    trainer = dt()
     pass

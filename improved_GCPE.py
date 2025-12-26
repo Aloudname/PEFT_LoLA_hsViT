@@ -641,6 +641,8 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
             self.levels.append(level)
         
         # layers in final block.
+        # register a buffer of final feature map for CAM.
+        self.register_buffer('final_feature_map', torch.zeros(1))
         self.norm = nn.LayerNorm(self.dims[-1])
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.head = EnhancedLoRALinear(
@@ -710,6 +712,37 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
             if hasattr(layer, 'set_cycle_factor'):
                 layer.set_cycle_factor(factor)
 
+    def generate_cam(self, class_idx=None):
+        """
+        Generate Class Activation Map (CAM) for the last forward pass.
+        
+        Args:
+            class_idx: Index of target class (``None`` for all classes).
+        
+        Returns:
+            cam: Tensor of shape [B, num_classes, H, W] (or [B, 1, H, W] if ``class_idx`` is specified)
+        """
+        # Get weights from classification head
+        weights = self.head.linear.weight  # [num_classes, C]
+        
+        # Feature map shape: [B, C, H, W]
+        feature_map = self.final_feature_map
+        B, C_feat, H, W = feature_map.shape    # C_feat = feature channels(384).
+        C_weights, _ =weights.shape  # C_weights = num_classes(9).
+        
+        # Compute CAM: weights @ feature_map -> [B, num_classes, H, W]
+        cam = torch.einsum('kc, bchw -> bkhw', weights, feature_map)  # Matrix multiplication over channels
+        
+        # Normalize CAM to [0, 1] per class
+        cam_min = cam.min(dim=-1, keepdim=True)[0].min(dim=-2, keepdim=True)[0]
+        cam_max = cam.max(dim=-1, keepdim=True)[0].max(dim=-2, keepdim=True)[0]
+        cam = (cam - cam_min) / (cam - cam_min + 1e-8)
+        
+        # Return specific class if requested.
+        if class_idx is not None:
+            cam = cam[:, class_idx:class_idx+1]  # [B, 1, H, W]
+        return cam
+
     def forward_features(self, x):
         """
         Forward pass with proper tensor handling.
@@ -753,10 +786,12 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
         B, H, W, C = x.shape
         x = x.reshape(B, H * W, C)
         x = self.norm(x)
-        
+
+        # Reshape back to spatial dims as final feature map.
+        self.final_feature_map = x.reshape(B, H, W, C).permute(0, 3, 1, 2).detach()  # [B, C, H, W]
         return x
 
-    def forward(self, x, pretrained_input=None):
+    def forward(self, x, pretrained_input=None, return_cam=False):
         """
         FIXED: Forward pass with proper input validation for hyperspectral data
         """
@@ -781,7 +816,10 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
         
         # Original classification path (pretrained and cross-attention removed)
         output = self.head(x)
-        
+
+        if return_cam:
+            cam = self.generate_cam()
+            return output, cam
         return output
 
 # LoRA Cyclic Learning Rate Scheduler.
