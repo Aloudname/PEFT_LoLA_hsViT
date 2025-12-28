@@ -305,8 +305,8 @@ class EnhancedPEFTWindowAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
-# Enhanced PEFT GCViT Block.
-class EnhancedPEFTGCViTBlock(nn.Module):
+# Enhanced PEFT LoLA_hsViT Block.
+class EnhancedPEFTLoLA_hsViTBlock(nn.Module):
     r"""
         Core block of the model with residual-like structure.
         
@@ -405,7 +405,7 @@ class EnhancedReduceSize(nn.Module):
             - Adaptive Squeeze-and-Excitation for channel attention.
 
         In this block, parameter of the model is reduced and limited due to:
-            - Conv2d to reduce the size before the next GCViT Block.
+            - Conv2d to reduce the size before the next LoLA_hsViT Block.
             - Squeeze-Excitation mechanism to screen important channel.
 
         Structure of the module:
@@ -516,13 +516,14 @@ def window_reverse(windows, window_size, H, W):
     
     return x
 
-# Final implementation of GCViT.
-class EnhancedPEFTHyperspectralGCViT(nn.Module):
+# Final implementation of LoLA_hsViT.
+class LoLA_hsViT(nn.Module):
     r"""
-    Enhanced PEFT GCViT model for hyperspectral image classification with:
+    LoLA_hsViT model for hyperspectral image classification with:
         - SE for channel attention.
         - Band Dropout for robustness.
         - LoRA in attention and MLP layers.
+        - Local Attention for more efficient.
         - Note: Without cross-attention.
 
     parameters initialization seen in ``__init__`` method.
@@ -537,9 +538,9 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
                 ``patch_embedded_X`` + ( ``zeros[1, H, W, C]`` )--> ``pos_embedded_X``
                 ``pos_embedded_X`` --( Dropout )--> ``X_2``
 
-        (3) Main GCViT Blocks of ``[B, HW/4, d] -> [B, HW/64, 4d]``:
-                ``X_2`` --( GCViT + down-sampling ) *2 --> ``X'``
-                ``X'`` --( GCViT )--> ``X_3``
+        (3) Main LAViT Blocks of ``[B, HW/4, d] -> [B, HW/64, 4d]``:
+                ``X_2`` --( LAViT + down-sampling ) *2 --> ``X'``
+                ``X'`` --( LAViT )--> ``X_3``
 
         (4) Classification Head of ``[B, HW/64, 4d] -> [B, K]``:
                 ``X_3`` --(Flatten + LN + AvePool + LoRA)--> output ``Y``
@@ -552,9 +553,9 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
             ``in_channels``: Number of input channels (spectral bands).
             ``num_classes``: Number of output classes for classification.
             ``dim``: Base dimension for model.
-            ``depths``: List of depths for each GCViT block.
-            ``num_heads``: List of number of attention heads for each GCViT block.
-            ``window_size``: List of window sizes for each GCViT block.
+            ``depths``: List of depths for each LoLA_hsViT block.
+            ``num_heads``: List of number of attention heads for each LoLA_hsViT block.
+            ``window_size``: List of window sizes for each LoLA_hsViT block.
             ``mlp_ratio``: Ratio for MLP hidden dimension.
             ``drop_path_rate``: Stochastic depth rate.
             ``spatial_size``: Spatial size.
@@ -605,7 +606,7 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
             self.dims.append(self.dims[-1] * 2)
         
 
-        # Main part: GCViT backbone with PEFT and self-attention.
+        # Main part: LAViT backbone with PEFT and self-attention.
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
         self.levels = nn.ModuleList()
         curr_idx = 0
@@ -617,7 +618,7 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
             # Create blocks for current LEVEL.
             level = nn.ModuleList()
             for j in range(depths[i]):
-                block = EnhancedPEFTGCViTBlock(
+                block = EnhancedPEFTLoLA_hsViTBlock(
                     dim=self.dims[i],
                     num_heads=num_heads[i],
                     window_size=window_size[i],
@@ -658,7 +659,7 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
         # Collect all LoRA layers for CLR updates
         self._collect_lora_layers()
         
-        print(f"Enhanced PEFT Hyperspectral GCViT initialized")
+        print(f"LoLA_hsViT initialized.")
 
     def _init_weights(self, m):
         if isinstance(m, (nn.Linear, EnhancedLoRALinear)):
@@ -772,7 +773,7 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
         x = x + self.pos_embed
         x = self.pos_drop(x)
         
-        # Process through GCViT backbone.
+        # Process through LoLA_hsViT backbone.
         for i, level in enumerate(self.levels):
             for j, block in enumerate(level):
                 if isinstance(block, EnhancedReduceSize):
@@ -806,7 +807,7 @@ class EnhancedPEFTHyperspectralGCViT(nn.Module):
             print(f"WARNING: Input has {C} channels, but model expects {self.in_channels}")
             print("This might cause issues if the number of channels is significantly different.")
         
-        # Original GCViT forward pass
+        # Original LoLA_hsViT forward pass
         x = self.forward_features(x)
         
         # Global pooling
@@ -906,7 +907,7 @@ class EnhancedLoRACLRScheduler:
         self.initial_lrs = state_dict['initial_lrs']
 
 # Model efficiency analysis function
-def analyze_model_efficiency(model, model_name="GCViT Model"):
+def analyze_model_efficiency(model, model_name="LoLA_hsViT Model"):
     """Analyze model parameter efficiency in memory use."""
     
     # Count different parameter types
@@ -1004,9 +1005,9 @@ def merge_lora_for_inference(model: nn.Module):
 # Note: functions below are for import models, merging PEFT methods and conducting on model settings.
 # =====================
 
-def load_pretrained_gcvit_backbone(pretrained_model_name: str = "nvidia/GCViT", use_pretrained: bool = True):
+def load_pretrained_LoLA_hsViT_backbone(pretrained_model_name: str = "nvidia/LoLA_hsViT", use_pretrained: bool = True):
     """
-    Load pretrained GCViT model from HuggingFace, with learned features from ImageNet.
+    Load pretrained LoLA_hsViT model from HuggingFace, with learned features from ImageNet.
     """
     if not use_pretrained:
         print("⚠️NO-PRETRAINED:  Using random initialization (no pretrained weights)")
@@ -1017,7 +1018,7 @@ def load_pretrained_gcvit_backbone(pretrained_model_name: str = "nvidia/GCViT", 
     try:
         from transformers import AutoModel, AutoConfig
         
-        # Try to load GCViT with proper configuration
+        # Try to load LoLA_hsViT with proper configuration
         config = AutoConfig.from_pretrained(pretrained_model_name, trust_remote_code=True)
         backbone = AutoModel.from_pretrained(
             pretrained_model_name,
@@ -1032,9 +1033,9 @@ def load_pretrained_gcvit_backbone(pretrained_model_name: str = "nvidia/GCViT", 
         
     except Exception as e:
         print(f"❌ Failed to load {pretrained_model_name}: {e}")
-        print("🔄 Creating simulated GCViT instead...")
+        print("🔄 Creating simulated LoLA_hsViT instead...")
         
-        class SimulatedGCViT(nn.Module):
+        class SimulatedLoLA_hsViT(nn.Module):
             """
                 An alternative self-generated model.
             """
@@ -1047,7 +1048,7 @@ def load_pretrained_gcvit_backbone(pretrained_model_name: str = "nvidia/GCViT", 
                     'intermediate_size': 3072
                 })()
                 
-                # GCViT structure
+                # LoLA_hsViT structure
                 self.embeddings = nn.Linear(3 * 224 * 224, 768)
                 self.encoder_layers = nn.ModuleList([
                     nn.TransformerEncoderLayer(
@@ -1061,7 +1062,7 @@ def load_pretrained_gcvit_backbone(pretrained_model_name: str = "nvidia/GCViT", 
                 self.layernorm = nn.LayerNorm(768)
             
             def forward(self, pixel_values):
-                # Simulate GCViT forward pass
+                # Simulate LoLA_hsViT forward pass
                 batch_size = pixel_values.shape[0]
                 x = pixel_values.flatten(1)  # (B, 3*224*224)
                 x = self.embeddings(x)  # (B, 768)
@@ -1073,8 +1074,8 @@ def load_pretrained_gcvit_backbone(pretrained_model_name: str = "nvidia/GCViT", 
                 x = self.layernorm(x)
                 return type('Outputs', (), {'last_hidden_state': x})()
         
-        backbone = SimulatedGCViT()
-        print("✓ Created simulated GCViT for demonstration")
+        backbone = SimulatedLoLA_hsViT()
+        print("✓ Created simulated LoLA_hsViT for demonstration")
         return backbone
 
 def apply_peft_lora_to_pretrained(backbone, lora_r: int = 16, lora_alpha: int = 32, lora_dropout: float = 0.1):
@@ -1091,7 +1092,7 @@ def apply_peft_lora_to_pretrained(backbone, lora_r: int = 16, lora_alpha: int = 
     try:
         from peft import LoraConfig, get_peft_model, TaskType
         
-        # Define LoRA configuration for GCViT
+        # Define LoRA configuration for LoLA_hsViT
         lora_config = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
@@ -1099,7 +1100,7 @@ def apply_peft_lora_to_pretrained(backbone, lora_r: int = 16, lora_alpha: int = 
                 "query", "key", "value",  # Attention layers
                 "fc1", "fc2",             # MLP layers
                 "proj", "proj_bias",      # Projection layers
-                "to_q", "to_k", "to_v",   # GCViT-specific layers
+                "to_q", "to_k", "to_v",   # LoLA_hsViT-specific layers
                 "to_out",                 # Output projection
                 "linear1", "linear2",     # Alternative MLP names
             ],
@@ -1158,7 +1159,7 @@ def merge_peft_lora_into_backbone(peft_model):
 def integrate_pretrained_with_custom_architecture(pretrained_backbone, custom_model):
     """
     Integrate adapted backbone into modified architecture for downstream use.
-    This connects the pretrained knowledge with GCViT components.
+    This connects the pretrained knowledge with LoLA_hsViT components.
     """
     print("Integrating Pretrained Backbone with Custom Architecture")
     
@@ -1168,12 +1169,12 @@ def integrate_pretrained_with_custom_architecture(pretrained_backbone, custom_mo
     
     try:
         # Here you would integrate the pretrained backbone features
-        # with your custom GCViT architecture
+        # with your custom LoLA_hsViT architecture
         # This is a placeholder for the integration logic
         
         print("✓ Successfully integrated pretrained backbone with custom architecture")
         print("  - Pretrained features available for custom processing")
-        print("  - Custom GCViT components can leverage pretrained knowledge")
+        print("  - Custom LoLA_hsViT components can leverage pretrained knowledge")
         
         return custom_model
         
@@ -1255,13 +1256,13 @@ def merge_peft_lora_into_enhanced_lora(peft_model, custom_model):
         print(f"❌ Failed to merge PEFT LoRA into Enhanced LoRA: {e}")
         return custom_model
 
-def complete_peft_workflow(pretrained_model_name: str = "nvidia/GCViT", 
+def complete_peft_workflow(pretrained_model_name: str = "nvidia/LoLA_hsViT", 
                           lora_r: int = 16, 
                           lora_alpha: int = 32,
                           use_pretrained: bool = True):
     """
     COMPLETE PEFT WORKFLOW: All PEFT steps in sequence:
-    1. Start with pretrained HuggingFace GCViT model.
+    1. Start with pretrained HuggingFace LoLA_hsViT model.
     2. Apply LoRA to efficient fine-tune on target task.  
     3. After training, merge LoRA parameters into backbone.
     4. Integrate adapted backbone into modified architecture for downstream use.
@@ -1270,12 +1271,12 @@ def complete_peft_workflow(pretrained_model_name: str = "nvidia/GCViT",
     print("COMPLETING PEFT WORKFLOW IMPLEMENTATION...")
     print("="*20)
     
-    # Step 1: Load pretrained GCViT model.
+    # Step 1: Load pretrained LoLA_hsViT model.
     print(f"\n Step 1: Loading Pretrained GC ViT Model")
     print(f"   Model: {pretrained_model_name}")
     print(f"   Use Pretrained: {use_pretrained}")
     
-    pretrained_backbone = load_pretrained_gcvit_backbone(pretrained_model_name, use_pretrained)
+    pretrained_backbone = load_pretrained_LoLA_hsViT_backbone(pretrained_model_name, use_pretrained)
     
     # Step 2: Apply LoRA on pretrained model.
     print(f"\n Step 2: Applying PEFT LoRA to Pretrained Model")
@@ -1285,11 +1286,11 @@ def complete_peft_workflow(pretrained_model_name: str = "nvidia/GCViT",
     peft_backbone = apply_peft_lora_to_pretrained(pretrained_backbone, lora_r, lora_alpha)
     
     # Step 3: Create custom architecture.
-    print(f"\n Step 3: Creating Custom GCViT Architecture")
-    print(f"   Architecture: EnhancedPEFTHyperspectralGCViT")
+    print(f"\n Step 3: Creating Custom LoLA_hsViT Architecture")
+    print(f"   Architecture: LoLA_hsViT")
     print(f"   LoRA Integration: Enhanced LoRA Linear")
     
-    custom_model = EnhancedPEFTHyperspectralGCViT(
+    custom_model = LoLA_hsViT(
         in_channels=15,
         num_classes=9,
         dim=96,
@@ -1317,13 +1318,13 @@ def complete_peft_workflow(pretrained_model_name: str = "nvidia/GCViT",
         'workflow_complete': True
     }
 
-def complete_peft_to_enhanced_workflow(pretrained_model_name: str = "nvidia/GCViT", 
+def complete_peft_to_enhanced_workflow(pretrained_model_name: str = "nvidia/LoLA_hsViT", 
                                      lora_r: int = 16, 
                                      lora_alpha: int = 32,
                                      use_pretrained: bool = True):
     """
     COMPLETE WORKFLOW: PEFT LoRA -> Enhanced LoRA Integration by:
-    1. Load pretrained GCViT.
+    1. Load pretrained LoLA_hsViT.
     2. Apply PEFT LoRA and train.
     3. Merge PEFT LoRA INTO custom model LoRA.
     """
@@ -1332,8 +1333,8 @@ def complete_peft_to_enhanced_workflow(pretrained_model_name: str = "nvidia/GCVi
     print("="*20)
     
     # Step 1: Load pretrained backbone
-    print(f"\n Step 1: Loading Pretrained GCViT")
-    pretrained_backbone = load_pretrained_gcvit_backbone(pretrained_model_name, use_pretrained)
+    print(f"\n Step 1: Loading Pretrained LoLA_hsViT")
+    pretrained_backbone = load_pretrained_LoLA_hsViT_backbone(pretrained_model_name, use_pretrained)
     
     # Step 2: Apply PEFT LoRA
     print(f"\n Step 2: Applying PEFT LoRA to Pretrained Model")
@@ -1341,7 +1342,7 @@ def complete_peft_to_enhanced_workflow(pretrained_model_name: str = "nvidia/GCVi
     
     # Step 3: Create custom model.
     print(f"\n Step 3: Creating Custom Model")
-    custom_model = EnhancedPEFTHyperspectralGCViT(
+    custom_model = LoLA_hsViT(
         in_channels=15,
         num_classes=6,
         dim=96,
@@ -1376,8 +1377,8 @@ def complete_peft_to_enhanced_workflow(pretrained_model_name: str = "nvidia/GCVi
     }
 
 # create enhanced model with proper channel configuration.
-def create_enhanced_model(spatial_size=15, num_classes=6, in_channels=15, lora_rank=16, lora_alpha=32, freeze_non_lora=True):
-    """Create enhanced PEFT hyperspectral GCViT model with proper channel configuration."""
+def create_model(spatial_size=15, num_classes=6, in_channels=15, lora_rank=16, lora_alpha=32, freeze_non_lora=True):
+    """Create enhanced PEFT hyperspectral LoLA_hsViT model with proper channel configuration."""
     
     print(f"Creating model with {in_channels} input channels")
     print(f"LoRA Configuration: rank={lora_rank}, alpha={lora_alpha}")
@@ -1385,7 +1386,7 @@ def create_enhanced_model(spatial_size=15, num_classes=6, in_channels=15, lora_r
     # Use original window sizes that work well
     window_sizes = [7, 7, 7]  # Original working window sizes
     
-    model = EnhancedPEFTHyperspectralGCViT(
+    model = LoLA_hsViT(
         in_channels=in_channels,  # Now properly configurable
         num_classes=num_classes,
         dim=96,
@@ -1404,13 +1405,15 @@ def create_enhanced_model(spatial_size=15, num_classes=6, in_channels=15, lora_r
         model.freeze_all_but_lora()
     
     # Analyze model efficiency
-    efficiency_results = analyze_model_efficiency(model, "Enhanced GCViT (LoRA)")
+    efficiency_results = analyze_model_efficiency(model, "LoLA_hsViT")
     
     return model, efficiency_results
 
 
-def load_hf_gcvit_into_model(model: nn.Module, hf_model_name: str = "nvidia/GCViT-Tiny", map_location: str = 'cpu', trust_remote_code: bool = True):
-    """Load pretrained GCViT weights from Hugging Face into our model (partial, non-strict).
+#####################################################
+# Need rewrite.
+def load_backbone_into_model(model: nn.Module, hf_model_name: str = "nvidia/LoLA_hsViT-Tiny", map_location: str = 'cpu', trust_remote_code: bool = True):
+    """Load pretrained LoLA_hsViT weights from Hugging Face into our model (partial, non-strict).
     This does not change architecture; it initializes overlapping weights.
     Returns (missing_keys, unexpected_keys).
     """
@@ -1428,7 +1431,7 @@ def load_hf_gcvit_into_model(model: nn.Module, hf_model_name: str = "nvidia/GCVi
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
     # Simple smoke test without any pretrained or cross-attention components
-    model, efficiency = create_enhanced_model(
+    model, efficiency = create_model(
         spatial_size=15,
         num_classes=6,
         in_channels=15,
