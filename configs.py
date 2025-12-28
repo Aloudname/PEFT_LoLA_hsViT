@@ -1,5 +1,14 @@
 # configuration of model hyperparams in training.py
 
+data_path = '/data/chenhaoran/WHUhypspec/data/WHU-Hi-LongKou.mat'
+label_path = '/data/chenhaoran/WHUhypspec/data/WHU-Hi-LongKou_gt.mat'
+data_key = label_key = 'hyperspectral_data'
+output_path = '/home/chenhaoran/LoLA-SpecViT-Model-main/outputs'
+
+target_names = [ 'Corn', 'Cotton', 'Sesame', 'Broad-leaf soybean',
+                    'Narrow-leaf soybean', 'Rice', 'Water',
+                    'Roads and houses', 'Mixed weed']
+
 config = {
         'num_epochs': 60,                  # Reduced for faster training
         'batch_size': 32,                  # Smaller batch size for stability
@@ -28,9 +37,11 @@ config = {
         'eval_batch_size': 32,             # Smaller eval batch size
         'gradient_accumulation_steps': 2,   # Reduced for CPU training
         'test_rate': 0.2,                  # 20% for test dataset
-        'patch_size': 15                     #Size of image patches
+        'patch_size': 15,                     #Size of image patches
+        'pca_components': 15
     }
 
+# Store only for references, without any application in program.
 dataset_registries = {
         "LongKou": {
             "data_path": "/data/chenhaoran/WHUhypspec/data/WHU-Hi-LongKou.mat",
