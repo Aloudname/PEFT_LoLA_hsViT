@@ -53,7 +53,7 @@ data:
     similarity_bootstrap_iters: 2000 # bootstrap over bands for cosine CIs (patient_band_diff_similarity.json)
     similarity_random_seed: 137 # added to data.split.seed in pipeline.core for bootstrap RNG
   preprocess:
-    mode: "lda_pca" # used in pipeline.dataset.SpectralReducer; options: none, supervised_pca, lda_pca, kernel_lda, pca_nca.
+    mode: "none" # used in pipeline.dataset.SpectralReducer; options: none, supervised_pca, lda_pca, kernel_lda, pca_nca.
     output_dim: 8 # final reduced HSI channels fed into HSIAdapter / vit backbone pipeline.
     max_fit_pixels: 500000 # pixel budget for reducer fitting from real train split only.
     snv: true # per-pixel SNV in SpectralReducer.
@@ -244,6 +244,32 @@ visualization:
   num_seg_examples: 4 # used in pipeline.visualize.show_segmentation.
   tsne_max_points: 3000 # used in pipeline.visualize.plot_tsne.
   spectral_max_points_per_class: 2000 # used in pipeline.visualize.plot_spectral.
+
+param_tracking:
+  enabled: true
+  snapshot_interval: 1
+  layers:
+    mode: "all"
+    include_keywords:
+      - "spectral_encoder"
+      - "backbone"
+      - "decoder"
+      - "classifier"
+      - "fusion"
+      - "refine"
+    include_patterns: []
+    exclude_keywords:
+      - "norm"
+      - "bn"
+      - "gn"
+      - "running_mean"
+      - "running_var"
+      - "num_batches_tracked"
+  save_full_snapshots: false
+  visualization:
+    top_n_layers: 30
+    alignment_smooth_window: 3
+    pca_sample_dims: 100
 
 export:
   export_onnx: true # used in pipeline.core.Pipeline._export_onnx.

@@ -10,6 +10,7 @@ outputs/
 synthetic_data/
 pretrained/
 docs/
+test/
 
 # test file
 diff.ipynb

@@ -23,6 +23,7 @@ from pipeline.visualize import Visualizer
 from model import HSIAdapter, RGBViT, UNet
 from pipeline.dataset import PreparedData, build_dataloaders
 from pipeline.trainer import Trainer, TrainerResult
+from pipeline.param_visualizer import visualize_param_dynamics
 from pipeline.analyzer import Analyzer, MetricsBundle
 from pipeline.stats_utils import bootstrap_cosine_similarity_summary, format_anonymous_patient_id, pairwise_cosine_matrix
 
@@ -240,7 +241,8 @@ class Pipeline:
         # post-visualizations
         stage_t0 = time.perf_counter()
         tprint("stage[viz]: generate visualizations")
-        self._run_visualizations(metrics_bundle, trainer_result, pred_pack, prepared, modality)
+        param_dynamics = trainer.param_dynamics
+        self._run_visualizations(metrics_bundle, trainer_result, pred_pack, prepared, modality, param_dynamics=param_dynamics)
         tprint(f"stage[viz] done in {time.perf_counter() - stage_t0:.2f}s")
 
         # model export
@@ -418,6 +420,7 @@ class Pipeline:
         pred_pack: Mapping[str, Any],
         prepared: Any,
         modality: str,
+        param_dynamics: Any = None,
     ) -> None:
         """generate all required plots."""
         
@@ -451,6 +454,13 @@ class Pipeline:
         attention = pred_pack.get("attention_map")
         tprint(f"visualization: attention map available={attention is not None}")
         self.visualizer.plot_attention_map(attention)
+
+        if param_dynamics is not None:
+            tprint("visualization: parameter dynamics")
+            vis_cfg = None
+            if hasattr(self.config, "param_tracking"):
+                vis_cfg = getattr(self.config.param_tracking, "visualization", None)
+            visualize_param_dynamics(param_dynamics, str(self.output_dir), config=vis_cfg)
 
     def _run_dataset_visualizations(self, prepared: Any, analysis_mode: bool = False) -> None:
         """generate dataset-only plots that do not depend on trained predictions."""

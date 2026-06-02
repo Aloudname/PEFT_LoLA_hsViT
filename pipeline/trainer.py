@@ -10,6 +10,7 @@ import copy, json, math, time
 import torch, torch.nn as nn, torch.nn.functional as F
 
 from pipeline.monitor import tprint
+from pipeline.param_tracker import ParamTracker
 
 
 def _cfg_get(config, path, default=None):
@@ -495,6 +496,11 @@ class Trainer:
             "epochs": [],
         }
         self.best_val_dice = -float("inf")
+
+        self.param_tracker = None
+        self.param_dynamics = None
+        if _cfg_get(config, "param_tracking.enabled", False):
+            self.param_tracker = ParamTracker(self.model, config)
 
     def _build_optimizer(self):
         tprint(f"building optimizer...")
@@ -1145,6 +1151,11 @@ class Trainer:
         with open(self.output_dir / "history.json", "w", encoding="utf-8") as f:
             json.dump(_to_serializable(self.history), f, indent=2)
 
+    def _save_param_dynamics(self):
+        if self.param_tracker is None:
+            return
+        self.param_tracker.save(self.output_dir)
+
     def fit(self, train_loader, val_loader=None, num_epochs=None):
         if num_epochs is None:
             num_epochs = int(_cfg_get(self.config, "train.epochs", 1))
@@ -1172,6 +1183,9 @@ class Trainer:
         early_min_delta = float(_cfg_get(self.config, "train.early_stop.min_delta", 0.0))
         early_best = -float("inf") if early_mode == "max" else float("inf")
         early_bad = 0
+
+        if self.param_tracker is not None:
+            self.param_tracker.record_epoch(0, "init")
 
         stage_spans: List[Dict[str, Any]] = []
         for stage_idx, stage_cfg in enumerate(stages):
@@ -1238,6 +1252,9 @@ class Trainer:
                 self.history["val_per_class_dice"].append({k: float(v["dice"]) for k, v in val_metrics["per_class"].items()})
                 self.history["train_loss_components"].append(train_metrics.get("loss_components", {}))
                 self.history["val_loss_components"].append(val_metrics.get("loss_components", {}))
+
+                if self.param_tracker is not None:
+                    self.param_tracker.record_epoch(global_epoch, stage_name)
 
                 is_best = float(val_summary["dice"]) >= float(self.best_val_dice)
                 if is_best:
@@ -1308,6 +1325,11 @@ class Trainer:
             stage_spans.append({"name": stage_name, "start": stage_start, "end": global_epoch})
 
         self.history["stage_spans"] = stage_spans
+
+        if self.param_tracker is not None:
+            self.param_dynamics = self.param_tracker.finalize()
+            self._save_param_dynamics()
+
         return TrainerResult(history=self.history, best_epoch=best_epoch or global_epoch, best_metric=float(self.best_val_dice))
 
     @torch.no_grad()
